@@ -9,12 +9,10 @@ export default async function handler(req, res) {
 
     let targetUrl = null;
 
-    // 1. Lấy từ req.query nếu Vercel đã parse sẵn
     if (req.query && req.query.url) {
         targetUrl = req.query.url;
     }
 
-    // 2. Tự phân tích trực tiếp từ req.url phòng trường hợp query bị trống
     if (!targetUrl && req.url) {
         try {
             const protocol = req.headers['x-forwarded-proto'] || 'https';
@@ -24,23 +22,12 @@ export default async function handler(req, res) {
         } catch (e) {}
     }
 
-    // 3. Lấy từ body nếu gửi dạng POST
     if (!targetUrl && req.body && req.body.url) {
         targetUrl = req.body.url;
     }
 
     if (!targetUrl) {
-        return res.status(400).json({ 
-            success: false, 
-            error: "Thiếu tham số 'url'. Vui lòng truyền URL cần bypass." 
-        });
-    }
-
-    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-        return res.status(400).json({ 
-            success: false, 
-            error: "URL không hợp lệ." 
-        });
+        return res.status(400).json({ success: false, error: "Thiếu tham số 'url'." });
     }
 
     console.log(`[Bypass Engine] Đang xử lý: ${targetUrl}`);
@@ -49,7 +36,7 @@ export default async function handler(req, res) {
         let finalDestination = null;
         const lowerUrl = targetUrl.toLowerCase();
 
-        // Xử lý đặc thù cho Linkvertise
+        // 1. Xử lý chuyên sâu cho Linkvertise
         if (lowerUrl.includes('linkvertise.com') || lowerUrl.includes('linkvertise.net')) {
             let pathSegments = new URL(targetUrl).pathname.split('/').filter(Boolean);
             let targetId = pathSegments[pathSegments.length - 1];
@@ -65,13 +52,15 @@ export default async function handler(req, res) {
                     });
                     if (resApi.ok) {
                         let data = await resApi.json();
-                        if (data && data.target) finalDestination = data.target;
+                        if (data && data.target && isValidDestination(data.target)) {
+                            finalDestination = data.target;
+                        }
                     }
                 } catch (e) {}
             }
         }
 
-        // Luồng quét chuyển hướng chung nếu chưa lấy được
+        // 2. Nếu chưa có, tiến hành fetch và quét HTML thông minh loại bỏ rác
         if (!finalDestination) {
             let response = await fetch(targetUrl, {
                 method: 'GET',
@@ -82,39 +71,33 @@ export default async function handler(req, res) {
                 redirect: 'follow'
             });
 
-            finalDestination = response.url;
-            let html = await response.text();
-
-            const urlRegex = /https?:\/\/[^\s<>"]+/g;
-            let matches = html.match(urlRegex);
-            if (matches) {
-                for (let m of matches) {
-                    let clean = m.replace(/["'}>,;\\)]/g, '');
-                    let lowerClean = clean.toLowerCase();
-                    if (
-                        clean.startsWith('http') &&
-                        !lowerClean.includes('gtraffic') &&
-                        !lowerClean.includes('link4m') &&
-                        !lowerClean.includes('linkvertise') &&
-                        !lowerClean.includes('google') &&
-                        !lowerClean.includes('cloudflare') &&
-                        !lowerClean.includes('w3.org')
-                    ) {
-                        finalDestination = clean;
-                        break;
+            if (response.url && isValidDestination(response.url) && response.url !== targetUrl) {
+                finalDestination = response.url;
+            } else {
+                let html = await response.text();
+                const urlRegex = /https?:\/\/[^\s<>"]+/g;
+                let matches = html.match(urlRegex);
+                
+                if (matches) {
+                    for (let m of matches) {
+                        let clean = m.replace(/["'}>,;\\)]/g, '');
+                        if (isValidDestination(clean)) {
+                            finalDestination = clean;
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        if (finalDestination) {
+        if (finalDestination && isValidDestination(finalDestination)) {
             return res.status(200).json({
                 success: true,
                 source: targetUrl,
                 destination: finalDestination
             });
         } else {
-            throw new Error("Không thể bóc tách ra được link đích.");
+            throw new Error("Không thể trích xuất được link đích hợp lệ.");
         }
 
     } catch (err) {
@@ -122,5 +105,40 @@ export default async function handler(req, res) {
             success: false, 
             error: err.message || "Lỗi xử lý hệ thống." 
         });
+    }
+}
+
+/**
+ * Hàm kiểm tra và lọc bỏ các link rác, CDN, font, hình ảnh, script
+ */
+function isValidDestination(urlStr) {
+    try {
+        let u = new URL(urlStr);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        
+        let href = u.href.toLowerCase();
+        let hostname = u.hostname.toLowerCase();
+
+        // Danh sách tên miền hệ thống / CDN / Font / MXH cần chặn tuyệt đối
+        const blacklistedDomains = [
+            'gstatic.com', 'googleapis.com', 'google.com', 'cloudflare.com',
+            'w3.org', 'schema.org', 'jsdelivr.net', 'cdnjs.cloudflare.com',
+            'linkvertise.com', 'linkvertise.net', 'link4m.com', 'gtraffic.io',
+            'lootlabs.gg', 'facebook.com', 'twitter.com', 'telegram.org', 'discord.com'
+        ];
+
+        for (let d of blacklistedDomains) {
+            if (hostname.includes(d)) return false;
+        }
+
+        // Chặn các đuôi tệp tin tài nguyên (hình ảnh, stylesheet, font, script)
+        const ignoredExtensions = ['.css', '.js', '.png', '.jpg', '.jpeg', '.ico', '.svg', '.woff', '.woff2', '.webp', '.json'];
+        for (let ext of ignoredExtensions) {
+            if (href.endsWith(ext) || href.includes(ext + '?')) return false;
+        }
+
+        return true;
+    } catch (e) {
+        return false;
     }
 }
