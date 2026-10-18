@@ -1,0 +1,9 @@
+{
+  "name": "my-bypass-api",
+  "version": "1.0.0",
+  "description": "Custom Bypass API on Vercel",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.x"
+  }
+}
